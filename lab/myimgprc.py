@@ -60,7 +60,7 @@ def roi_circle(mg, center, radius, color=(0, 0, 255), lw=2):
     mask = cv.circle(mask, center, radius, 255, -1)
     roi = cv.bitwise_and(img, img, mask=mask)
     img = cv.circle(img, center, radius, color, lw)
-    roy_id = (mask == 255)
+    roi_id = (mask == 255)
     return roi, roi_id, img
 
 

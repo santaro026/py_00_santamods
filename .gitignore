@@ -3,6 +3,8 @@ __pycache__/
 
 results/
 
+data/
+
 lab/.vscode/
 lab/_*.py
 

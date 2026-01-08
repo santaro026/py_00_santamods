@@ -3,7 +3,6 @@ Created on Wed Dec 03 19:18:42 2025
 @author: santaro
 
 
-
 """
 
 import numpy as np
@@ -17,9 +16,18 @@ from pydub.playback import play
 
 import cv2 as cv
 
+import time
 import sys
 import os
+import platform
 from pathlib import Path
+
+if platform.system() == "Windows":
+    import msvcrt
+else:
+    import select
+    import termios
+    import tty
 
 import config
 
@@ -157,6 +165,28 @@ class MyVideoEditor:
         )
 
 
+def wait_key(timeout_ms=0):
+    if platform.system() == "Windows":
+        end = time.time() + timeout_ms / 1000
+        while True:
+            if msvcrt.kbhit():
+                return msvcrt.getwch()
+            if timeout_ms > 0 and time.time() > end:
+                return None
+            time.sleep(0.01)
+    else:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            r, _, _ = select.select([sys.stdin], [], [], timeout_ms / 1000)
+            if r:
+                return sys.stdin.read(1)
+            return None
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
 def check_ffmpeg():
     print(sys.executable)
     print(os.environ.get("PATH", "")[:200], "...")
@@ -172,17 +202,19 @@ if __name__ == "__main__":
     print("---- test ----")
     print(f"ROOT: {config.ROOT}")
 
-    audio_editor = MyAudioEditor(config.ROOT/"data"/"sampledata"/"wav"/"desk_hand.wav")
+
+
+
+    # audio_editor = MyAudioEditor(config.ROOT/"data"/"sampledata"/"wav"/"desk_hand.wav")
     # audio_editor = MyAudioEditor(config.ROOT/"data"/"sampledata"/"wav"/"desk_iphone.wav")
-    print(repr(audio_editor))
+    # print(repr(audio_editor))
     # audio_editor.play(trange=[0, 10000], volume_db=0)
 
     # import myfft
 
-    fig, ax = plt.subplots(figsize=(20, 12))
-    ax.plot(audio_editor.t, audio_editor.soundl)
-    plt.show()
-
+    # fig, ax = plt.subplots(figsize=(20, 12))
+    # ax.plot(audio_editor.t, audio_editor.soundl)
+    # plt.show()
 
     # video_editor = MyVideoEditor(config.ROOT/"data"/"video_sample.mp4")
     # print(repr(video_editor))

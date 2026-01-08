@@ -314,7 +314,7 @@ if __name__ == '__main__':
     datadir = Path(r"D:/data/tc23/mat")
     # datadir = Path(r"D:/data/tc26/mat")
     datafile = datadir / f"REC{rec}.mat"
-    audiodl = myav.AudioDataLoader(datafile)
+    audiodl = myav.MyAudioDataLoader(datafile)
     analyzer = Myfft(audiodl.t, audiodl.sound, 48000)
     # res = analyzer.split_data(fft_size=2**12, lastseg="pad", tranges=[(0, 0.2), (0.5, 0.8)], overlap=0)
     # analyzer.fft_main(tranges=[(0, 0.5), (1, 2)], lastseg="raw")
@@ -341,8 +341,6 @@ if __name__ == '__main__':
 
 
     # plt.show()
-
-
 
 
     """
@@ -398,7 +396,6 @@ if __name__ == '__main__':
     res_list = [res_sc02, res_sc28, res_sc29, res_sc33]
     color_list = ['k', 'r', 'orange', 'b']
 
-
     # plotter = myplotter.MyPlotter(sizecode=myplotter.PlotSizeCode.RECTANGLE_FIG)
     # fig, axs = plotter.myfig(ysigf=3)
     # for i, res in enumerate(res_list):
@@ -409,7 +406,6 @@ if __name__ == '__main__':
     # axs[0].set(xlim=(0, 20000))
 
     plt.show()
-
 
 
     """
