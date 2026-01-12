@@ -16,6 +16,7 @@ from pydub.playback import play
 
 import cv2 as cv
 
+import math
 import time
 import sys
 import os
@@ -99,6 +100,11 @@ class MyAudioEditor:
                 print(f"**** OSError in os.unlink(tmp_path), temp file still remained: {tmp_path}")
         else:
             play(self._audio)
+
+    def trange2frange(self, trange):
+        st, et = trange
+        sf, ef = st * self.sample_rate, et * self.sample_rate
+        return (int(sf), int(ef))
 
     def adjust_audio_offset(self, offset_ms):
         audio_to_mix = self._audio
@@ -202,15 +208,40 @@ if __name__ == "__main__":
     print("---- test ----")
     print(f"ROOT: {config.ROOT}")
 
+    datafile = Path(r"/home/sintaro/data/sampledata/mp3/canon.mp3")
 
+    audioe = MyAudioEditor(datafile)
+    print(repr(audioe))
+    # audioe.play()
+
+    trange = (0, 20)
+    sf, ef = audioe.trange2frange(trange=trange)
+
+    t = audioe.t[sf:ef]
+    ft = audioe.t[sf:ef]
+
+    import myfft
+    fft = myfft.Myfft(t, ft, audioe.sample_rate)
+
+    freq, sp = fft.make_spectrogram()
+
+
+
+    fig, axs = plt.subplots(2, 1, figsize=(20, 12))
+    axs = axs.flatten()
+
+    axs[0].plot(audioe.t[sf:ef], audioe.soundl[sf:ef], c='b', lw=1)
+
+
+    plt.show()
 
 
     # audio_editor = MyAudioEditor(config.ROOT/"data"/"sampledata"/"wav"/"desk_hand.wav")
     # audio_editor = MyAudioEditor(config.ROOT/"data"/"sampledata"/"wav"/"desk_iphone.wav")
+
     # print(repr(audio_editor))
     # audio_editor.play(trange=[0, 10000], volume_db=0)
 
-    # import myfft
 
     # fig, ax = plt.subplots(figsize=(20, 12))
     # ax.plot(audio_editor.t, audio_editor.soundl)

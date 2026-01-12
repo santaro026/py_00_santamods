@@ -82,10 +82,11 @@ class Myfft:
                 raise ValueError(f"Unsupported window: {window_name}")
         return w
 
-    def _normalize_amplitude_scale(self, sp, n, is_even: bool) -> np.ndarray:
+    def _normalize_amplitude_scale(self, sp, n) -> np.ndarray:
         y = sp.copy()
         y *= (2.0 / n)
         y[0] *= 0.5
+        is_even = (n%2==0)
         if is_even and len(y) > 1:
             y[-1] *= 0.5
         return y
@@ -95,7 +96,7 @@ class Myfft:
         f_end = np.where(self.t<=trange[1])[0][-1]
         return (f_start, f_end)
 
-    def split_data(self, fft_size, overlap=0.5, lastseg="cut", tranges=None):
+    def split_data(self, fft_size, overlap=0.5, lastseg="pad", tranges=None):
         franges = []
         if tranges:
             for trange in tranges:
@@ -147,36 +148,51 @@ class Myfft:
         }
         return _cache
 
-    def execute_fft(self, ft, window_func, is_real=True, use_fftshift=True, fft_backend="scipy"):
+    def compute_fft(self, ft, window_func, mode="psd", is_real=True, use_fftshift=True, fft_backend="scipy"):
         n = len(ft)
         if fft_backend == "numpy":
             FFT = npfft
         elif fft_backend == "scipy":
             FFT = scfft
         window = self._get_window(window_func, n, fft_backend)
-        rms_window = np.sqrt(np.mean(window**2))
-        # acf_window = sum(window)/n
+        pw_window = np.mean(window**2)
+        rms_window = np.sqrt(pw_window)
+        # avg_window = sum(window)/n
         ft_windowed = ft * window
         if is_real:
             sp = FFT.rfft(ft_windowed)
             freq = FFT.rfftfreq(n, self.dt)
-            sp = self._normalize_amplitude_scale(abs(sp), n, (n%2==0))
         elif not is_real:
             sp = FFT.fft(ft_windowed)
             freq = FFT.fftfreq(n, self.dt)
             if use_fftshift:
                 sp = FFT.fftshift(sp)
                 freq = FFT.fftshift(freq)
-                sp = self._normalize_amplitude_scale(abs(sp), n, (n%2==0))
             else:
                 sp = sp[freq>=0]
                 freq = freq[freq>=0]
-                sp = self._normalize_amplitude_scale(abs(sp), n, (n%2==0))
-        sp /= rms_window
-        # sp /= acf_window
+        if mode == "psd":
+            sp = abs(sp)**2
+            sp /= (n * pw_window * self.sample_rate)
+            sp[1:-1] *= 2
+        elif mode == "spectrum":
+            sp = abs(sp)**2
+            sp /= (n * n * pw_window)
+            if is_real:
+                sp[1:-1] *= 2
+            else:
+                sp[1:] *= 2
+            # if window_func in ("hann", "hanning"):
+                # sp[1:-1] *= 1.5
+        elif mode == "magnitude":
+            sp = self._normalize_amplitude_scale(abs(sp), n)
+            sp /= rms_window
+            # sp /= avg_window
+        else:
+            raise ValueError(f"invalid argument: mode {mode}")
         return freq, sp
 
-    def fft_main(self, tranges=None, fft_size=2**12, overlap=0.5, lastseg="cut", window_func='hann', is_real=True, use_fftshift=True, fft_backend="scipy"):
+    def compute_segmented_fft(self, mode="psd", tranges=None, fft_size=2**12, overlap=0.5, lastseg="pad", window_func='hann', is_real=True, use_fftshift=True, fft_backend="scipy"):
         _cache = self.split_data(fft_size=fft_size, overlap=overlap, lastseg=lastseg, tranges=tranges)
         res = []
         for _t, _ft in zip(self.t_splitted, self.ft_splitted):
@@ -184,7 +200,7 @@ class Myfft:
                 pad_len = fft_size - len(_t)
                 _ft = np.pad(_ft, (0, pad_len), mode='constant', constant_values=0)
                 _cache["zero_padding"] = pad_len
-            _res = self.execute_fft(_ft, window_func, is_real=is_real, use_fftshift=use_fftshift ,fft_backend=fft_backend)
+            _res = self.compute_fft(_ft, window_func, mode=mode, is_real=is_real, use_fftshift=use_fftshift ,fft_backend=fft_backend)
             res.append(_res)
         freq = res[0][0]
         sp = np.zeros(len(freq))
@@ -194,6 +210,7 @@ class Myfft:
         self.sp = sp
         self.freq = freq
         _cache2 = {
+            "mode": mode,
             "window_func": window_func,
             "sp": self.sp,
             "freq": freq
@@ -202,7 +219,7 @@ class Myfft:
         self.cache.append(_cache)
         return freq, sp
 
-    def plot_result(self, plot_mode="plot", show_peaks=True, findpeak_height=10**-3, findpeak_distance=1, xrange=None, yrange=None, xtick=[1, 2000], ytick=None, xsigf=0, ysigf=0, ylabel=["time [sec]", "amplitude"], notell=""):
+    def plot_result(self, plot_mode="plot", is_log=True, show_peaks=True, findpeak_height=10**-3, findpeak_distance=1, xrange=None, yrange=None, xtick=[1, 2000], ytick=None, xsigf=0, ysigf=0, ylabel=["time [sec]", "amplitude"], notell=""):
         t_per_window = self.cache[-1]["fft_size"] / self.sample_rate
         _x = self.t[-1]*0.02
         plotter = myplotter.MyPlotter(sizecode=myplotter.PlotSizeCode.LANDSCAPE_FIG_21)
@@ -218,19 +235,32 @@ class Myfft:
         axs[0].text(0, 0.96, f"window size: {t_per_window*1000:.1f} [ms]", fontsize=8, transform=axs[0].transAxes)
         axs[0].axvline(x=_x, c='g', lw=0.4)
         axs[0].axvline(x=_x+t_per_window, c='g', lw=0.4)
+        mode = self.cache[-1]["mode"]
+        _sp = self.sp
+        if is_log:
+            eps = np.finfo(float).tiny
+            if mode in ("psd", "spectrum"):
+                _sp = 10 * np.log10(np.maximum(_sp, eps))
+            elif mode == "magnitude":
+                _sp = 20 * np.log10(np.maximum(_sp, eps))
+            elif mode == "complex":
+                amp = np.abs(_sp)
+                _sp = 20 * np.log10(np.maximum(amp, eps))
+            else:
+                pass
         if plot_mode == "plot":
-            axs[1].plot(self.freq, self.sp, c='b', lw=1, alpha=1)
+            axs[1].plot(self.freq, _sp, c='b', lw=1, alpha=1)
         elif plot_mode == "stem":
-            mline, sline, bline = axs[1].stem(self.freq, self.sp, linefmt='-b', markerfmt='None', basefmt='b')
+            mline, sline, bline = axs[1].stem(self.freq, _sp, linefmt='-b', markerfmt='None', basefmt='b')
         if show_peaks:
-            height_max = np.max(self.sp[1:])
+            height_max = np.max(_sp[1:])
             if findpeak_height == 'auto':
                 findpeak_height = height_max / 10
-            peaks, props = signal.find_peaks(self.sp, height=findpeak_height, distance=findpeak_distance)
+            peaks, props = signal.find_peaks(_sp, height=findpeak_height, distance=findpeak_distance)
             heights = props['peak_heights']
             arrowprops = dict(arrowstyle="-")
             for _p, _h in zip(peaks, heights):
-                axs[1].annotate(f'{round(self.freq[_p])}\n{round(_h, 2)}', (self.freq[_p], self.sp[_p]), textcoords='offset points', xytext=(0, 40), ha='center', arrowprops=arrowprops)
+                axs[1].annotate(f'{round(self.freq[_p])}\n{round(_h, 2)}', (self.freq[_p], _sp[_p]), textcoords='offset points', xytext=(0, 40), ha='center', arrowprops=arrowprops)
                 # axs[1].annotate(f'f: {round(freq[_p])}\na: {round(_h, 2)}', (freq[_p], f_abs_amp[_p]), textcoords='data', xytext=(_p, height_max), ha='center')
         return fig, axs
 
@@ -265,66 +295,126 @@ class Myfft:
             pcm.set_clim(vmin=vrange[0], vmax=vrange[1])
         return fig, axs
 
-def generate_periodic_data(duration, sample_rate, freqs, amps):
+def generate_periodic_data(duration, sample_rate, num_elements=1, freqs=None, amps=None, has_leakage=False, noise_level=0, noise_type="normal"):
     dt = 1 / sample_rate
-    N = duration * sample_rate + 1
-    t = np.linspace(0, duration , N)
+    fundamental_freq = 1 / duration
+    N = duration * sample_rate
+    if N.is_integer():
+        N = int(N)
+    else:
+        raise ValueError(f"number of sample N must be integer: {N}")
+    t = np.linspace(0, 1 , N, endpoint=False) * duration
+    if not freqs or not amps: rng = np.random.default_rng(seed=0)
+    if not freqs:
+        if has_leakage:
+            freqs = rng.uniform(0, sample_rate//2, num_elements)
+        else:
+            freqs = rng.integers(0, N//2, num_elements) * fundamental_freq
+    if not amps:
+        amps = rng.uniform(0, 100, num_elements)
     ft = 0
     for f, a in zip(freqs, amps):
         ft += a * np.sin(2*np.pi*f*t)
+    if noise_type == "normal":
+        ft += rng.normal(0, 0.1, ft.size) * noise_level
     freqs_preview = np.array2string(freqs, precision=2)
     amps_preview = np.array2string(amps, precision=2)
-    print(f"duration: {duration}, sample_rate: {sample_rate}, dt: {dt}")
-    print(f"freqs: {freqs_preview}\naamps: {amps_preview}")
-    return t, ft
+    print(f"duration: {duration}, sample_rate: {sample_rate}, dt: {dt}, num_elements: {num_elements}")
+    print(f"freqs: {freqs_preview}\namps: {amps_preview}")
+    return t, ft, freqs, amps
 
+def pw2db(ft):
+    eps = np.finfo(float).tiny
+    db = 10 * np.log10(np.maximum(ft, eps))
+    return db
+def mag2db(ft):
+    eps = np.finfo(float).tiny
+    db = 20 * np.log10(np.maximum(ft, eps))
+    return db
+def complex2db(ft):
+    eps = np.finfo(float).tiny
+    ft = np.abs(ft)
+    db = 20 * np.log10(np.maximum(ft, eps))
+    return db
+
+def calc_analytic_psd(freqs, amps, bin_size=None, freq_axis=None):
+    if bin_size:
+        psd = np.zeros_like(freqs)
+        for c, a in enumerate(amps):
+            psd[c] = a**2 / 2 / bin_size
+    elif freq_axis:
+        psd = np.zeros_like(freq_axis)
+        df = freq_axis[1] - freq_axis[0]
+        for f, a in zip(freqs, amps):
+            idx = np.argmin(np.abs(freq_axis - f))
+            psd[idx] = a**2 / 2 / df
+    return psd
+
+def calc_analytic_spectrum(freqs, amps, freq_axis=None):
+    if not freq_axis:
+        psd = np.zeros_like(freqs)
+        for c, a in enumerate(amps):
+            psd[c] = a**2 / 2
+    elif freq_axis:
+        psd = np.zeros_like(freq_axis)
+        for f, a in zip(freqs, amps):
+            idx = np.argmin(np.abs(freq_axis - f))
+            psd[idx] = a**2 / 2
+    return psd
 
 if __name__ == '__main__':
     print('---- test ----')
     #### generate sample data
     # rng = np.random.default_rng(seed=0)
-    # duration = 1
-    # sample_rate = 48000
-    # dt = 1 / sample_rate
-    # num_element = 40
-    # freqs = rng.uniform(0, 22000, num_element)
-    # amps = rng.uniform(0, 20, num_element)
-    # t, ft = generate_periodic_data(duration, sample_rate, freqs, amps)
+    sample_rate = 48000
+    duration = (2**15) / sample_rate
+    dt = 1 / sample_rate
+    num_elements = 4
+    has_leakage = False
+    noise_level = 0
+    t, ft, freqs, amps = generate_periodic_data(duration, sample_rate, num_elements=num_elements, has_leakage=has_leakage, noise_level=noise_level)
 
-    fft_size = 2**8
-    overlap = 0.5
-    window_func = 'hann'
+    #### params
+    fft_size = 2**15
+    overlap = 0
+    window_func = "rectangular"
+    window_func = "hann"
+    lastseg = "cut"
+    is_log = False
+    mode = "spectrum"
+    # mode = "psd"
 
-    # analyzer = Myfft(t, ft, sample_rate)
-    # analyzer.fft_main(is_real=False, use_fftshift=True, fft_backend="scipy")
-    # fig, axs = analyzer.plot_result()
-    # axs[1].plot(analyzer.freq, analyzer.sp, c='r', lw=2, alpha=0.4)
-    # axs[1].bar(freqs, amps, width=200, color='g', alpha=0.4)
-    # fig, axs = analyzer.make_spectrogram(nperseg=2**8, noverlap=0.5)
+    if mode == "psd":
+        scaling = "density"
+    elif mode == "spectrum":
+        scaling = "spectrum"
 
+    analyzer = Myfft(t, ft, sample_rate)
+    analyzer.compute_segmented_fft(fft_size=fft_size, window_func=window_func, overlap=overlap, mode=mode, lastseg=lastseg, is_real=True, use_fftshift=True, fft_backend="scipy")
+    fig, axs = analyzer.plot_result(show_peaks=False, is_log=is_log)
+    # axs[1].plot(analyzer.freq, analyzer.sp, c='b', lw=2, alpha=0.4)
+    f_welch, Pxx_welch = signal.welch(x=ft, fs=sample_rate, window=window_func, nperseg=fft_size, noverlap=int(overlap*fft_size), scaling=scaling)
+    axs[1].plot(f_welch, Pxx_welch, c='r', alpha=0.4, lw=2)
 
-    import myav
+    # amps = calc_analytic_psd(freqs, amps, bin_size=sample_rate/fft_size)
+    amps = calc_analytic_spectrum(freqs, amps)
+    if is_log:
+        _amps = mag2db(amps)
+        bottom = -100
+    else:
+        _amps = amps
+        bottom = 0
+    axs[1].bar(freqs, _amps, width=200, bottom=bottom, color='g', alpha=0.4)
+    # mline, sline, bline = axs[1].stem(freqs, _amps, bottom=bottom, linefmt='-r', markerfmt='None', basefmt='r')
 
-    rec = 2490
-    rec = 2600
-    rec = 2673
-    # rec = 2683
-    # rec = 2684
-    rec = 2267
-    datadir = Path(r"D:/data/tc23/mat")
-    # datadir = Path(r"D:/data/tc26/mat")
-    datafile = datadir / f"REC{rec}.mat"
-    audiodl = myav.MyAudioDataLoader(datafile)
-    analyzer = Myfft(audiodl.t, audiodl.sound, 48000)
-    # res = analyzer.split_data(fft_size=2**12, lastseg="pad", tranges=[(0, 0.2), (0.5, 0.8)], overlap=0)
-    # analyzer.fft_main(tranges=[(0, 0.5), (1, 2)], lastseg="raw")
-    # fig, axs = analyzer.plot_result(show_peaks=False, yrange=[(-20, 20), None])
-    # fig, axs = analyzer.make_spectrogram(nperseg=2**10, noverlap=0.5, is_log=False, yrange=[(-10, 10), (0, 10000)], shading="nearest", vrange=(0, 0.0001))
-    fig, axs = analyzer.make_spectrogram(nperseg=2**10, noverlap=0.5, is_log=True, yrange=[None, (0, 10000)], shading="nearest", vrange=(-100, -40))
+    # fig, axs = analyzer.make_spectrogram(nperseg=2**8, noverlap=0.5, is_log=True, yrange=[None, (0, 10000)], shading="nearest", vrange=(-100, -40))
+
+    # print(analyzer.cache)
     plt.show()
 
     # fig, ax = plt.subplots(figsize=(15, 8))
 
+    # res = analyzer.split_data(fft_size=fft_size, lastseg="pad", tranges=[(0, 0.2), (0.5, 0.8)], overlap=0)
     # x = res["t_target"]
     # y = res["ft_target"]
     # xs = res["t_splitted"]
@@ -356,41 +446,41 @@ if __name__ == '__main__':
 
     audio_dataloader_sc02 = myav.AudioDataLoader(datafile_sc02)
     analyzer_sc02 = Myfft(audio_dataloader_sc02.t, audio_dataloader_sc02.sound, 48000)
-    res_sc02 = analyzer_sc02.fft_main(trange=(0, 0.6), is_real=True, fft_backend="scipy", fft_size=fft_size)
+    res_sc02 = analyzer_sc02.compute_segmented_fft(trange=(0, 0.6), is_real=True, fft_backend="scipy", fft_size=fft_size)
     # fig, axs = analyzer_sc02.plot_result(show_peaks=False, yrange=[(-20, 20), None])
     # analyzer_sc02.make_spectrogram(nperseg=2**8, noverlap=0.5)
 
     audio_dataloader_sc03 = myav.AudioDataLoader(datafile_sc03)
     analyzer_sc03 = Myfft(audio_dataloader_sc03.t, audio_dataloader_sc03.sound, 48000)
-    res_sc03 = analyzer_sc03.fft_main(trange=(5, 5.6), is_real=True, fft_backend="scipy", fft_size=fft_size)
+    res_sc03 = analyzer_sc03.compute_segmented_fft(trange=(5, 5.6), is_real=True, fft_backend="scipy", fft_size=fft_size)
     # fig, axs = analyzer_sc03.plot_result(show_peaks=False, yrange=[(-20, 20), None])
     # analyzer_sc03.make_spectrogram(nperseg=2**8, noverlap=0.5)
 
     audio_dataloader_sc05 = myav.AudioDataLoader(datafile_sc05)
     analyzer_sc05 = Myfft(audio_dataloader_sc05.t, audio_dataloader_sc05.sound, 48000)
-    res_sc05 = analyzer_sc05.fft_main(trange=(5, 5.6), is_real=True, fft_backend="scipy", fft_size=fft_size)
+    res_sc05 = analyzer_sc05.compute_segmented_fft(trange=(5, 5.6), is_real=True, fft_backend="scipy", fft_size=fft_size)
     # fig, axs = analyzer_sc05.plot_result(show_peaks=False, yrange=[(-20, 20), None])
 
     audio_dataloader_sc28 = myav.AudioDataLoader(datafile_sc28)
     # print(audio_dataloader_sc28)
     analyzer_sc28 = Myfft(audio_dataloader_sc28.t, audio_dataloader_sc28.sound, 48000)
-    res_sc28 = analyzer_sc28.fft_main(trange=(2.6, 3.2), is_real=True, fft_backend="scipy", fft_size=fft_size)
+    res_sc28 = analyzer_sc28.compute_segmented_fft(trange=(2.6, 3.2), is_real=True, fft_backend="scipy", fft_size=fft_size)
     # fig, axs = analyzer_sc28.plot_result(show_peaks=False)
 
     audio_dataloader_sc29 = myav.AudioDataLoader(datafile_sc29)
     analyzer_sc29 = Myfft(audio_dataloader_sc29.t, audio_dataloader_sc29.sound, 48000)
-    res_sc29 = analyzer_sc29.fft_main(trange=(1, 1.6), is_real=True, fft_backend="scipy", fft_size=fft_size)
+    res_sc29 = analyzer_sc29.compute_segmented_fft(trange=(1, 1.6), is_real=True, fft_backend="scipy", fft_size=fft_size)
     # fig, axs = analyzer_sc29.plot_result(show_peaks=False)
 
     audio_dataloader_sc32 = myav.AudioDataLoader(datafile_sc32)
     analyzer_sc32 = Myfft(audio_dataloader_sc32.t, audio_dataloader_sc32.sound, 48000)
-    res_sc32 = analyzer_sc32.fft_main(trange=(3.2, 3.8), is_real=True, fft_backend="scipy", fft_size=fft_size)
+    res_sc32 = analyzer_sc32.compute_segmented_fft(trange=(3.2, 3.8), is_real=True, fft_backend="scipy", fft_size=fft_size)
     # fig, axs = analyzer_sc32.plot_result(show_peaks=False)
     analyzer_sc32.make_spectrogram(nperseg=2**10, noverlap=0.5)
 
     audio_dataloader_sc33 = myav.AudioDataLoader(datafile_sc33)
     analyzer_sc33 = Myfft(audio_dataloader_sc33.t, audio_dataloader_sc33.sound, 48000)
-    res_sc33 = analyzer_sc33.fft_main(trange=(3.2, 3.8), is_real=True, fft_backend="scipy", fft_size=fft_size)
+    res_sc33 = analyzer_sc33.compute_segmented_fft(trange=(3.2, 3.8), is_real=True, fft_backend="scipy", fft_size=fft_size)
     # fig, axs = analyzer_sc33.plot_result(show_peaks=False)
 
     res_list = [res_sc02, res_sc28, res_sc29, res_sc33]
